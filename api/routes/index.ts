@@ -14,7 +14,8 @@ import {
   generateForecast,
   getWeeklyReports,
   getFeedPrices,
-  checkAndCreateWarnings
+  checkAndCreateWarnings,
+  getCityDataByProvince
 } from '../services/dataService.js';
 import { getDb } from '../services/db.js';
 
@@ -176,6 +177,20 @@ router.get('/feed-prices', async (req, res) => {
     res.json({ success: true, data: prices });
   } catch (err) {
     res.status(500).json({ success: false, message: '服务器错误' });
+  }
+});
+
+router.get('/metrics/city-data', async (req, res) => {
+  try {
+    const { province } = req.query;
+    if (!province) {
+      return res.status(400).json({ success: false, message: '缺少province参数' });
+    }
+    const data = await getCityDataByProvince(province as string);
+    res.json({ success: true, data });
+  } catch (err) {
+    console.error('获取城市数据失败:', err);
+    res.status(500).json({ success: false, message: '获取城市数据失败' });
   }
 });
 

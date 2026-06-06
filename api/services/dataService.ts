@@ -490,3 +490,96 @@ async function createWarning(province: string, type: string, level: string, desc
     }))
   };
 }
+
+export async function getCityDataByProvince(province: string): Promise<{
+  cities: string[];
+  trendData: { date: string; [key: string]: number | string }[];
+  diseaseData: { city: string; positiveRate: number }[];
+}> {
+  const db = await getDb();
+  
+  const sevenDaysAgo = new Date();
+  sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+  const startDate = sevenDaysAgo.toISOString().split('T')[0];
+  
+  const farmData = await db.all(`
+    SELECT fd.*, f.name as farm_name, f.province, f.city, f.scale, f.breed
+    FROM farm_data fd
+    JOIN farms f ON fd.farm_id = f.id
+    WHERE f.province = ? AND fd.report_date >= ?
+    ORDER BY fd.report_date ASC
+  `, [province, startDate]);
+  
+  const cityMap = new Map<string, Map<string, { slaughter: number; diseasePositive: number; count: number }>>();
+  const dateSet = new Set<string>();
+  const citySet = new Set<string>();
+  
+  for (const d of farmData as any[]) {
+    const city = d.city || '未知';
+    const date = d.report_date;
+    citySet.add(city);
+    dateSet.add(date);
+    
+    if (!cityMap.has(city)) {
+      cityMap.set(city, new Map());
+    }
+    const dateMap = cityMap.get(city)!;
+    if (!dateMap.has(date)) {
+      dateMap.set(date, { slaughter: 0, diseasePositive: 0, count: 0 });
+    }
+    const entry = dateMap.get(date)!;
+    entry.slaughter += d.slaughter || 0;
+    entry.diseasePositive += d.disease_positive_rate || 0;
+    entry.count += 1;
+  }
+  
+  const dates = Array.from(dateSet).sort();
+  const cities = Array.from(citySet);
+  
+  const trendData = dates.map(date => {
+    const row: any = { date };
+    for (const city of cities) {
+      const dateMap = cityMap.get(city);
+      const entry = dateMap?.get(date);
+      row[city] = entry ? entry.slaughter : 0;
+    }
+    return row;
+  });
+  
+  const diseaseData = cities.map(city => {
+    const dateMap = cityMap.get(city);
+    let totalPositive = 0;
+    let totalCount = 0;
+    if (dateMap) {
+      for (const entry of dateMap.values()) {
+        totalPositive += entry.diseasePositive;
+        totalCount += entry.count;
+      }
+    }
+    return {
+      city,
+      positiveRate: totalCount > 0 ? Math.round(totalPositive / totalCount * 100) / 100 : 0
+    };
+  });
+  
+  return {
+    cities,
+    trendData,
+    diseaseData
+  };
+}
+
+export default {
+  getNationalMetrics,
+  getFarmData,
+  getSlaughterData,
+  getMarketData,
+  getWarnings,
+  approveWarningStep,
+  getForecast,
+  generateForecast,
+  getWeeklyReports,
+  getFeedPrices,
+  checkAndCreateWarnings,
+  getCityDataByProvince
+};

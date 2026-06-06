@@ -95,4 +95,9 @@ export async function checkWarnings(): Promise<ApiResponse<any>> {
   return res.data;
 }
 
+export async function getCityDataByProvince(province: string): Promise<ApiResponse<any>> {
+  const res = await api.get('/metrics/city-data', { params: { province } });
+  return res.data;
+}
+
 export default api;

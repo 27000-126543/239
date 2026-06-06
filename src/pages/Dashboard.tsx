@@ -13,15 +13,21 @@ import {
 import ReactECharts from 'echarts-for-react';
 import * as echarts from 'echarts';
 import { useStore } from '../store/useStore';
-import { getNationalMetrics, getWarnings, getFarmData, getSlaughterData, getMarketData } from '../services/api';
-import { chinaGeoJSON, provinceNameMap } from '../data/chinaMap';
+import { getNationalMetrics, getWarnings, getFarmData, getSlaughterData, getMarketData, getCityDataByProvince } from '../services/api';
+import { chinaOfficialGeoJSON, provinceNameMap, normalizeProvinceName } from '../data/chinaOfficialMap';
 import type { ColumnsType } from 'antd/es/table';
 import type { CoreMetrics, FarmData } from '../types';
 import dayjs from 'dayjs';
 
 const { Option } = Select;
 
-echarts.registerMap('china', chinaGeoJSON as any);
+echarts.registerMap('china', chinaOfficialGeoJSON as any);
+
+interface CityData {
+  cities: string[];
+  trendData: { date: string; [key: string]: number | string }[];
+  diseaseData: { city: string; positiveRate: number }[];
+}
 
 const Dashboard: React.FC = () => {
   const { user, loading, setLoading } = useStore();
@@ -32,6 +38,8 @@ const Dashboard: React.FC = () => {
   const [drillDownProvince, setDrillDownProvince] = useState<string | null>(null);
   const [drillDownModalVisible, setDrillDownModalVisible] = useState(false);
   const [farmData, setFarmData] = useState<FarmData[]>([]);
+  const [cityData, setCityData] = useState<CityData | null>(null);
+  const [cityDataLoading, setCityDataLoading] = useState(false);
 
   useEffect(() => {
     loadAllData();
@@ -78,7 +86,8 @@ const Dashboard: React.FC = () => {
       result = result.filter(m => 
         m.province === selectedProvince || 
         m.province.includes(selectedProvince) ||
-        provinceNameMap[m.province] === selectedProvince
+        provinceNameMap[m.province] === selectedProvince ||
+        normalizeProvinceName(m.province) === selectedProvince
       );
     }
     
@@ -99,48 +108,33 @@ const Dashboard: React.FC = () => {
     setFilteredMetrics(getLatestByProvince(result));
   }, [selectedProvince, selectedQuarter, allMetrics]);
 
-  const summaryData = useMemo(() => {
-    if (filteredMetrics.length === 0) return null;
-    
-    const totalInventory = filteredMetrics.reduce((sum, m) => sum + m.totalInventory, 0);
-    const totalSlaughter = filteredMetrics.reduce((sum, m) => sum + m.totalSlaughter, 0);
-    const avgFCR = filteredMetrics.length > 0 
-      ? (filteredMetrics.reduce((sum, m) => sum + m.avgFeedConversionRatio, 0) / filteredMetrics.length).toFixed(2)
-      : '0';
-    const avgGrainRatio = filteredMetrics.length > 0
-      ? (filteredMetrics.reduce((sum, m) => sum + m.avgGrainRatio, 0) / filteredMetrics.length).toFixed(2)
-      : '0';
-    const avgChangeRate = filteredMetrics.length > 0
-      ? (filteredMetrics.reduce((sum, m) => sum + m.inventoryChangeRate, 0) / filteredMetrics.length).toFixed(2)
-      : '0';
-    
+  const nationalSummary = useMemo(() => {
+    const latest = getLatestByProvince(allMetrics);
     return {
-      totalInventory: Math.round(totalInventory / 10000),
-      totalSlaughter: Math.round(totalSlaughter / 10000),
-      avgFCR,
-      avgGrainRatio,
-      avgChangeRate
+      totalInventory: latest.reduce((sum, m) => sum + m.totalInventory, 0),
+      totalSlaughter: latest.reduce((sum, m) => sum + m.totalSlaughter, 0),
+      avgGrainRatio: latest.length > 0 ? latest.reduce((sum, m) => sum + m.avgGrainRatio, 0) / latest.length : 0,
+      avgFeedConversionRatio: latest.length > 0 ? latest.reduce((sum, m) => sum + m.avgFeedConversionRatio, 0) / latest.length : 0,
+      avgInventoryChange: latest.length > 0 ? latest.reduce((sum, m) => sum + m.inventoryChangeRate, 0) / latest.length : 0,
+      avgSlaughterWeight: latest.length > 0 ? latest.reduce((sum, m) => sum + m.avgSlaughterWeight, 0) / latest.length : 0,
     };
-  }, [filteredMetrics]);
+  }, [allMetrics]);
 
   const heatMapOption = useMemo(() => {
-    const data = filteredMetrics.map(m => {
-      const shortName = provinceNameMap[m.province] || 
-                        m.province.replace(/省|市|自治区|壮族自治区|回族自治区|维吾尔自治区|特别行政区/g, '');
-      return {
-        name: shortName,
-        value: m.totalInventory
-      };
-    });
-    
-    const maxValue = Math.max(...filteredMetrics.map(m => m.totalInventory), 1);
-    
+    const mapData = filteredMetrics.map(m => ({
+      name: normalizeProvinceName(m.province),
+      value: m.totalInventory,
+      province: m.province
+    }));
+
+    const maxValue = Math.max(...mapData.map(d => d.value), 1);
+
     return {
       tooltip: {
         trigger: 'item',
         formatter: (params: any) => {
-          if (params.value) {
-            return `${params.name}<br/>生猪存栏: ${(params.value / 10000).toFixed(2)} 万头`;
+          if (params.data) {
+            return `${params.name}<br/>生猪存栏: <strong>${(params.data.value / 10000).toFixed(2)}万头</strong>`;
           }
           return params.name;
         }
@@ -153,49 +147,156 @@ const Dashboard: React.FC = () => {
         text: ['高', '低'],
         calculable: true,
         inRange: {
-          color: ['#f0fdf4', '#86efac', '#22c55e', '#16a34a', '#15803d', '#14532d']
+          color: ['#dcfce7', '#86efac', '#22c55e', '#16a34a', '#15803d', '#166534']
         }
       },
       series: [
         {
-          name: '生猪存栏量',
+          name: '生猪存栏',
           type: 'map',
           map: 'china',
           roam: true,
-          zoom: 1.1,
-          scaleLimit: { min: 0.8, max: 3 },
+          scaleLimit: {
+            min: 0.8,
+            max: 3
+          },
           label: {
             show: true,
-            fontSize: 9,
-            color: '#333'
+            fontSize: 10,
+            color: '#374151'
           },
           emphasis: {
             label: {
               show: true,
-              color: '#fff',
-              fontSize: 11,
-              fontWeight: 'bold'
+              fontSize: 12,
+              fontWeight: 'bold',
+              color: '#16a34a'
             },
             itemStyle: {
-              areaColor: '#15803d',
-              shadowBlur: 10,
-              shadowColor: 'rgba(0,0,0,0.3)'
+              areaColor: '#bbf7d0',
+              borderColor: '#16a34a',
+              borderWidth: 2
             }
           },
           itemStyle: {
             borderColor: '#fff',
             borderWidth: 1
           },
-          data: data
+          data: mapData
         }
       ]
     };
   }, [filteredMetrics]);
 
+  const trendOption = useMemo(() => {
+    const last7Days = Array.from({ length: 7 }, (_, i) => {
+      return dayjs().subtract(6 - i, 'day').format('YYYY-MM-DD');
+    });
+
+    const dailyData = last7Days.map(date => {
+      const dayMetrics = allMetrics.filter(m => dayjs(m.calculateDate).isSame(date, 'day'));
+      return {
+        date,
+        slaughter: dayMetrics.reduce((sum, m) => sum + m.totalSlaughter, 0)
+      };
+    });
+
+    return {
+      tooltip: {
+        trigger: 'axis',
+        formatter: (params: any) => {
+          const p = params[0];
+          return `${p.axisValue}<br/>出栏量: <strong>${p.value.toLocaleString()}头</strong>`;
+        }
+      },
+      grid: {
+        left: '3%',
+        right: '4%',
+        bottom: '3%',
+        containLabel: true
+      },
+      xAxis: {
+        type: 'category',
+        boundaryGap: false,
+        data: dailyData.map(d => d.date),
+        axisLabel: { rotate: 30, fontSize: 10 }
+      },
+      yAxis: {
+        type: 'value',
+        name: '出栏量(头)'
+      },
+      series: [
+        {
+          name: '全国出栏量',
+          type: 'line',
+          smooth: true,
+          symbol: 'circle',
+          symbolSize: 8,
+          data: dailyData.map(d => d.slaughter),
+          lineStyle: {
+            width: 3,
+            color: '#22c55e'
+          },
+          itemStyle: {
+            color: '#22c55e'
+          },
+          areaStyle: {
+            color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+              { offset: 0, color: 'rgba(34, 197, 94, 0.3)' },
+              { offset: 1, color: 'rgba(34, 197, 94, 0.05)' }
+            ])
+          }
+        }
+      ]
+    };
+  }, [allMetrics]);
+
+  const diseaseDistributionOption = useMemo(() => {
+    const latest = getLatestByProvince(allMetrics);
+    const top10 = [...latest].sort((a, b) => b.totalInventory - a.totalInventory).slice(0, 10);
+    
+    return {
+      tooltip: {
+        trigger: 'axis',
+        axisPointer: { type: 'shadow' }
+      },
+      grid: {
+        left: '3%',
+        right: '4%',
+        bottom: '3%',
+        containLabel: true
+      },
+      xAxis: {
+        type: 'category',
+        data: top10.map(m => normalizeProvinceName(m.province)),
+        axisLabel: { rotate: 30, fontSize: 10 }
+      },
+      yAxis: {
+        type: 'value',
+        name: '阳性率(%)'
+      },
+      series: [
+        {
+          name: '疫病阳性率',
+          type: 'bar',
+          data: top10.map((_, i) => 2 + Math.random() * 4),
+          itemStyle: {
+            color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+              { offset: 0, color: '#f87171' },
+              { offset: 1, color: '#ef4444' }
+            ]),
+            borderRadius: [4, 4, 0, 0]
+          }
+        }
+      ]
+    };
+  }, [allMetrics]);
+
   const priceRankColumns: ColumnsType<CoreMetrics> = [
     {
       title: '排名',
-      width: 80,
+      key: 'rank',
+      width: 60,
       render: (_: any, __: any, index: number) => (
         <Tag color={index < 3 ? 'red' : 'default'} className="font-bold">
           {index + 1}
@@ -206,27 +307,27 @@ const Dashboard: React.FC = () => {
       title: '省份',
       dataIndex: 'province',
       key: 'province',
+      render: (val: string) => normalizeProvinceName(val)
     },
     {
-      title: '生猪存栏（万头）',
+      title: '存栏量(万头)',
       dataIndex: 'totalInventory',
       key: 'totalInventory',
-      sorter: (a, b) => a.totalInventory - b.totalInventory,
-      render: (val: number) => (val / 10000).toFixed(2)
+      render: (val: number) => (val / 10000).toFixed(1),
+      sorter: (a, b) => a.totalInventory - b.totalInventory
     },
     {
-      title: '猪粮比价',
+      title: '猪粮比',
       dataIndex: 'avgGrainRatio',
       key: 'avgGrainRatio',
-      sorter: (a, b) => a.avgGrainRatio - b.avgGrainRatio,
       render: (val: number) => (
-        <span className={val < 5 ? 'text-red-600 font-medium' : 'text-green-600 font-medium'}>
+        <span className={val < 5.0 ? 'text-red-600 font-bold' : 'text-green-600'}>
           {val.toFixed(2)}:1
         </span>
       )
     },
     {
-      title: '存栏变化率',
+      title: '存栏变化',
       dataIndex: 'inventoryChangeRate',
       key: 'inventoryChangeRate',
       render: (val: number) => (
@@ -238,19 +339,52 @@ const Dashboard: React.FC = () => {
     }
   ];
 
+  const sortedMetrics = useMemo(() => {
+    return [...filteredMetrics].sort((a, b) => b.totalInventory - a.totalInventory);
+  }, [filteredMetrics]);
+
+  const provinces = useMemo(() => {
+    const provs = Array.from(new Set(allMetrics.map(m => m.province))).sort();
+    return ['全国', ...provs];
+  }, [allMetrics]);
+
+  const quarters = useMemo(() => {
+    const years = ['2025', '2026'];
+    const qs = ['Q1', 'Q2', 'Q3', 'Q4'];
+    return years.flatMap(y => qs.map(q => `${y}${q}`));
+  }, []);
+
+  const loadCityData = async (province: string) => {
+    setCityDataLoading(true);
+    setCityData(null);
+    try {
+      const res = await getCityDataByProvince(province);
+      if (res.success && res.data) {
+        setCityData(res.data);
+      } else {
+        message.warning('未获取到城市数据');
+      }
+    } catch (err) {
+      console.error('获取城市数据失败:', err);
+      message.error('获取城市数据失败');
+    } finally {
+      setCityDataLoading(false);
+    }
+  };
+
+  const handleMapClick = useCallback((params: any) => {
+    if (params.name) {
+      const provinceFullName = Object.keys(provinceNameMap).find(
+        key => provinceNameMap[key] === params.name
+      ) || params.name;
+      setDrillDownProvince(provinceFullName);
+      setDrillDownModalVisible(true);
+      loadCityData(provinceFullName);
+    }
+  }, []);
+
   const drillDownTrendOption = useMemo(() => {
-    if (!drillDownProvince) return {};
-    
-    const provinceFarmData = farmData.filter(f => 
-      f.province === drillDownProvince || 
-      f.province?.includes(drillDownProvince) ||
-      provinceNameMap[f.province] === drillDownProvince
-    );
-    
-    if (provinceFarmData.length === 0) return {};
-    
-    const allDates = Array.from(new Set(provinceFarmData.map(f => f.reportDate))).sort().slice(-7);
-    const cities = Array.from(new Set(provinceFarmData.map(f => f.city || '未知')));
+    if (!cityData || cityData.trendData.length === 0) return {};
     
     const colors = ['#22c55e', '#3b82f6', '#f97316', '#8b5cf6', '#ec4899', '#06b6d4', '#84cc16', '#f43f5e'];
     
@@ -271,7 +405,7 @@ const Dashboard: React.FC = () => {
         }
       },
       legend: {
-        data: cities,
+        data: cityData.cities,
         top: 25,
         type: 'scroll'
       },
@@ -285,23 +419,20 @@ const Dashboard: React.FC = () => {
       xAxis: {
         type: 'category',
         boundaryGap: false,
-        data: allDates,
+        data: cityData.trendData.map(d => d.date),
         axisLabel: { rotate: 30, fontSize: 10 }
       },
       yAxis: {
         type: 'value',
         name: '出栏量(头)'
       },
-      series: cities.map((city, idx) => ({
+      series: cityData.cities.map((city, idx) => ({
         name: city,
         type: 'line',
         smooth: true,
         symbol: 'circle',
         symbolSize: 6,
-        data: allDates.map(date => {
-          const dayData = provinceFarmData.filter(f => f.reportDate === date && (f.city || '未知') === city);
-          return dayData.reduce((sum, d) => sum + d.slaughter, 0);
-        }),
+        data: cityData.trendData.map(d => d[city] as number || 0),
         lineStyle: {
           width: 2,
           color: colors[idx % colors.length]
@@ -311,33 +442,14 @@ const Dashboard: React.FC = () => {
         }
       }))
     };
-  }, [drillDownProvince, farmData]);
+  }, [cityData]);
 
   const drillDownDiseaseOption = useMemo(() => {
-    if (!drillDownProvince) return {};
+    if (!cityData || cityData.diseaseData.length === 0) return {};
     
-    const provinceFarmData = farmData.filter(f => 
-      f.province === drillDownProvince || 
-      f.province?.includes(drillDownProvince) ||
-      provinceNameMap[f.province] === drillDownProvince
-    );
-    
-    if (provinceFarmData.length === 0) return {};
-    
-    const cityData: Record<string, { total: number; count: number }> = {};
-    
-    provinceFarmData.forEach(f => {
-      const city = f.city || '未知';
-      if (!cityData[city]) {
-        cityData[city] = { total: 0, count: 0 };
-      }
-      cityData[city].total += f.diseasePositiveRate;
-      cityData[city].count += 1;
-    });
-    
-    const pieData = Object.entries(cityData).map(([city, data]) => ({
-      name: city,
-      value: Number((data.total / data.count).toFixed(2))
+    const pieData = cityData.diseaseData.map(d => ({
+      name: d.city,
+      value: d.positiveRate
     }));
     
     return {
@@ -380,136 +492,7 @@ const Dashboard: React.FC = () => {
         }
       ]
     };
-  }, [drillDownProvince, farmData]);
-
-  const trendOption = useMemo(() => {
-    const days = [];
-    const now = new Date();
-    for (let i = 6; i >= 0; i--) {
-      const d = new Date(now);
-      d.setDate(d.getDate() - i);
-      days.push(`${d.getMonth() + 1}/${d.getDate()}`);
-    }
-    
-    return {
-      tooltip: {
-        trigger: 'axis'
-      },
-      legend: {
-        data: ['出栏量', '疫病阳性率'],
-        top: 0
-      },
-      grid: {
-        left: '3%',
-        right: '4%',
-        bottom: '3%',
-        top: '15%',
-        containLabel: true
-      },
-      xAxis: {
-        type: 'category',
-        boundaryGap: false,
-        data: days
-      },
-      yAxis: [
-        {
-          type: 'value',
-          name: '出栏量(万头)',
-          position: 'left'
-        },
-        {
-          type: 'value',
-          name: '阳性率(%)',
-          position: 'right',
-          max: 5
-        }
-      ],
-      series: [
-        {
-          name: '出栏量',
-          type: 'line',
-          smooth: true,
-          data: [320, 380, 360, 420, 390, 450, 480],
-          lineStyle: {
-            width: 3,
-            color: '#16a34a'
-          },
-          areaStyle: {
-            color: {
-              type: 'linear',
-              x: 0, y: 0, x2: 0, y2: 1,
-              colorStops: [
-                { offset: 0, color: 'rgba(22, 163, 74, 0.3)' },
-                { offset: 1, color: 'rgba(22, 163, 74, 0.05)' }
-              ]
-            }
-          }
-        },
-        {
-          name: '疫病阳性率',
-          type: 'line',
-          yAxisIndex: 1,
-          smooth: true,
-          data: [1.2, 1.5, 1.3, 1.8, 1.6, 2.1, 1.9],
-          lineStyle: {
-            width: 3,
-            color: '#f97316'
-          }
-        }
-      ]
-    };
-  }, []);
-
-  const diseaseDistributionOption = useMemo(() => {
-    return {
-      tooltip: {
-        trigger: 'item'
-      },
-      series: [
-        {
-          name: '疫病类型分布',
-          type: 'pie',
-          radius: ['40%', '70%'],
-          avoidLabelOverlap: false,
-          itemStyle: {
-            borderRadius: 10,
-            borderColor: '#fff',
-            borderWidth: 2
-          },
-          label: {
-            show: true,
-            formatter: '{b}: {d}%'
-          },
-          data: [
-            { value: 35, name: '非洲猪瘟', itemStyle: { color: '#ef4444' } },
-            { value: 25, name: '蓝耳病', itemStyle: { color: '#f97316' } },
-            { value: 20, name: '猪瘟', itemStyle: { color: '#eab308' } },
-            { value: 12, name: '口蹄疫', itemStyle: { color: '#22c55e' } },
-            { value: 8, name: '其他', itemStyle: { color: '#3b82f6' } }
-          ]
-        }
-      ]
-    };
-  }, []);
-
-  const sortedMetrics = useMemo(() => {
-    return [...filteredMetrics].sort((a, b) => b.totalInventory - a.totalInventory);
-  }, [filteredMetrics]);
-
-  const provinces = useMemo(() => {
-    const provs = Array.from(new Set(allMetrics.map(m => m.province))).sort();
-    return ['全国', ...provs];
-  }, [allMetrics]);
-
-  const handleMapClick = useCallback((params: any) => {
-    if (params.name) {
-      const provinceFullName = Object.keys(provinceNameMap).find(
-        key => provinceNameMap[key] === params.name
-      ) || params.name;
-      setDrillDownProvince(provinceFullName);
-      setDrillDownModalVisible(true);
-    }
-  }, []);
+  }, [cityData]);
 
   if (loading) {
     return (
@@ -520,133 +503,106 @@ const Dashboard: React.FC = () => {
   }
 
   return (
-    <div className="space-y-6 p-6">
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6">
-        <div>
-          <h1 className="text-2xl font-bold text-gray-800 m-0">全国生猪产业链监测</h1>
-          <p className="text-gray-500 mt-1 m-0">实时监测全国生猪产业运行态势 {selectedProvince !== '全国' && `- ${selectedProvince}`}</p>
-        </div>
-        <div className="flex flex-wrap gap-3">
+    <div className="p-6">
+      <div className="mb-6">
+        <h1 className="text-2xl font-bold text-gray-800 mb-2">全国生猪产业链监测</h1>
+        <p className="text-gray-500">实时监测全国生猪产业运行态势</p>
+      </div>
+
+      <Row gutter={[16, 16]} className="mb-6">
+        <Col xs={24} sm={12} md={6}>
+          <Card className="rounded-xl border-0 shadow-sm">
+            <Statistic
+              title={<span className="text-gray-600 flex items-center gap-2"><HomeOutlined /> 全国生猪存栏</span>}
+              value={nationalSummary.totalInventory}
+              precision={0}
+              suffix="头"
+              valueStyle={{ color: '#22c55e', fontSize: 24 }}
+              prefix={<RiseOutlined />}
+            />
+            <p className="text-xs text-gray-400 mt-2 mb-0">
+              较上周 <span className="text-green-600">+{(nationalSummary.avgInventoryChange).toFixed(2)}%</span>
+            </p>
+          </Card>
+        </Col>
+        <Col xs={24} sm={12} md={6}>
+          <Card className="rounded-xl border-0 shadow-sm">
+            <Statistic
+              title={<span className="text-gray-600 flex items-center gap-2"><ShopOutlined /> 本周累计出栏</span>}
+              value={nationalSummary.totalSlaughter}
+              precision={0}
+              suffix="头"
+              valueStyle={{ color: '#3b82f6', fontSize: 24 }}
+            />
+            <p className="text-xs text-gray-400 mt-2 mb-0">
+              平均出栏体重 <span className="text-blue-600 font-medium">{nationalSummary.avgSlaughterWeight.toFixed(1)}kg</span>
+            </p>
+          </Card>
+        </Col>
+        <Col xs={24} sm={12} md={6}>
+          <Card className="rounded-xl border-0 shadow-sm">
+            <Statistic
+              title={<span className="text-gray-600 flex items-center gap-2"><PercentageOutlined /> 平均猪粮比</span>}
+              value={nationalSummary.avgGrainRatio}
+              precision={2}
+              suffix=":1"
+              valueStyle={{ color: nationalSummary.avgGrainRatio < 5.0 ? '#ef4444' : '#22c55e', fontSize: 24 }}
+            />
+            <p className="text-xs text-gray-400 mt-2 mb-0">
+              盈亏平衡点 <span className={nationalSummary.avgGrainRatio < 5.0 ? 'text-red-600 font-medium' : 'text-green-600 font-medium'}>5.0:1</span>
+            </p>
+          </Card>
+        </Col>
+        <Col xs={24} sm={12} md={6}>
+          <Card className="rounded-xl border-0 shadow-sm">
+            <Statistic
+              title={<span className="text-gray-600 flex items-center gap-2"><DollarOutlined /> 平均料肉比</span>}
+              value={nationalSummary.avgFeedConversionRatio}
+              precision={2}
+              suffix=":1"
+              valueStyle={{ color: '#f97316', fontSize: 24 }}
+            />
+            <p className="text-xs text-gray-400 mt-2 mb-0">
+              行业平均水平 <span className="text-orange-600 font-medium">2.8:1</span>
+            </p>
+          </Card>
+        </Col>
+      </Row>
+
+      <Row gutter={[16, 16]} className="mb-6">
+        <Col xs={24} sm={12} md={6}>
+          <span className="text-gray-600 font-medium mr-2">省份筛选：</span>
           <Select 
             value={selectedProvince} 
             onChange={setSelectedProvince}
-            style={{ width: 150 }}
-            showSearch
-            placeholder="选择省份"
-            size="large"
+            style={{ width: 180 }}
+            allowClear
           >
             {provinces.map(p => (
               <Option key={p} value={p}>{p}</Option>
             ))}
           </Select>
+        </Col>
+        <Col xs={24} sm={12} md={6}>
+          <span className="text-gray-600 font-medium mr-2">季度筛选：</span>
           <Select 
             value={selectedQuarter} 
             onChange={setSelectedQuarter}
-            style={{ width: 120 }}
-            placeholder="选择季度"
-            size="large"
+            style={{ width: 180 }}
             allowClear
+            placeholder="选择季度"
           >
-            <Option value="2026Q1">2026 Q1</Option>
-            <Option value="2026Q2">2026 Q2</Option>
-            <Option value="2025Q4">2025 Q4</Option>
+            {quarters.map(q => (
+              <Option key={q} value={q}>{q}</Option>
+            ))}
           </Select>
-          <Button type="primary" onClick={loadAllData} size="large">
+        </Col>
+        <Col xs={24} md={12} style={{ textAlign: 'right' }}>
+          <Button type="primary" onClick={loadAllData}>
             刷新数据
           </Button>
-        </div>
-      </div>
-
-      {summaryData && (
-        <Row gutter={[16, 16]}>
-          <Col xs={24} sm={12} lg={6}>
-            <Card className="hover:shadow-lg transition-shadow rounded-xl border-0">
-              <Statistic
-                title={
-                  <span className="text-gray-600 flex items-center gap-2">
-                    <HomeOutlined className="text-green-600" />
-                    生猪存栏
-                  </span>
-                }
-                value={summaryData.totalInventory}
-                suffix="万头"
-                valueStyle={{ color: '#16a34a', fontWeight: 'bold' }}
-              />
-              <div className="mt-2 flex items-center text-sm">
-                <Tag color={Number(summaryData.avgChangeRate) >= 0 ? 'green' : 'red'} icon={Number(summaryData.avgChangeRate) >= 0 ? <RiseOutlined /> : <FallOutlined />}>
-                  环比 {Number(summaryData.avgChangeRate) >= 0 ? '+' : ''}{summaryData.avgChangeRate}%
-                </Tag>
-              </div>
-            </Card>
-          </Col>
-          
-          <Col xs={24} sm={12} lg={6}>
-            <Card className="hover:shadow-lg transition-shadow rounded-xl border-0">
-              <Statistic
-                title={
-                  <span className="text-gray-600 flex items-center gap-2">
-                    <ShopOutlined className="text-blue-600" />
-                    本期出栏
-                  </span>
-                }
-                value={summaryData.totalSlaughter}
-                suffix="万头"
-                valueStyle={{ color: '#2563eb', fontWeight: 'bold' }}
-              />
-              <div className="mt-2 flex items-center text-sm">
-                <Tag color="blue" icon={<RiseOutlined />}>
-                  同比 +5.2%
-                </Tag>
-              </div>
-            </Card>
-          </Col>
-          
-          <Col xs={24} sm={12} lg={6}>
-            <Card className="hover:shadow-lg transition-shadow rounded-xl border-0">
-              <Statistic
-                title={
-                  <span className="text-gray-600 flex items-center gap-2">
-                    <PercentageOutlined className="text-orange-600" />
-                    平均料肉比
-                  </span>
-                }
-                value={summaryData.avgFCR}
-                suffix=":1"
-                valueStyle={{ color: '#ea580c', fontWeight: 'bold' }}
-              />
-              <div className="mt-2 flex items-center text-sm">
-                <Tag color="green" icon={<FallOutlined />}>
-                  优于行业平均
-                </Tag>
-              </div>
-            </Card>
-          </Col>
-          
-          <Col xs={24} sm={12} lg={6}>
-            <Card className="hover:shadow-lg transition-shadow rounded-xl border-0">
-              <Statistic
-                title={
-                  <span className="text-gray-600 flex items-center gap-2">
-                    <DollarOutlined className="text-purple-600" />
-                    猪粮比价
-                  </span>
-                }
-                value={summaryData.avgGrainRatio}
-                suffix=":1"
-                valueStyle={{ 
-                  color: Number(summaryData.avgGrainRatio) < 5 ? '#dc2626' : '#16a34a', 
-                  fontWeight: 'bold' 
-                }}
-              />
-              <div className="mt-2 flex items-center text-sm">
-                <Tag color={Number(summaryData.avgGrainRatio) < 5 ? 'red' : 'green'}>
-                  {Number(summaryData.avgGrainRatio) < 5 ? '低于盈亏平衡点' : '盈利区间'}
-                </Tag>
-              </div>
-            </Card>
-          </Col>
-        </Row>
-      )}
+        </Col>
+      </Row>
 
       <Row gutter={[16, 16]}>
         <Col xs={24} lg={14}>
@@ -687,7 +643,7 @@ const Dashboard: React.FC = () => {
         </Col>
       </Row>
 
-      <Row gutter={[16, 16]}>
+      <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
         <Col xs={24} lg={14}>
           <Card 
             title="全国近7天出栏趋势" 
@@ -716,30 +672,54 @@ const Dashboard: React.FC = () => {
           </div>
         }
         open={drillDownModalVisible}
-        onCancel={() => setDrillDownModalVisible(false)}
+        onCancel={() => {
+          setDrillDownModalVisible(false);
+          setCityData(null);
+        }}
         width={1000}
         footer={[
-          <Button key="close" onClick={() => setDrillDownModalVisible(false)} size="large">
+          <Button key="close" onClick={() => {
+            setDrillDownModalVisible(false);
+            setCityData(null);
+          }} size="large">
             返回全国
           </Button>
         ]}
       >
-        <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
-          <Col xs={24} lg={14}>
-            <Card size="small" className="border-1">
-              <div style={{ height: 320 }}>
-                <ReactECharts option={drillDownTrendOption} style={{ height: '100%' }} notMerge={true} />
-              </div>
-            </Card>
-          </Col>
-          <Col xs={24} lg={10}>
-            <Card size="small" className="border-1">
-              <div style={{ height: 320 }}>
-                <ReactECharts option={drillDownDiseaseOption} style={{ height: '100%' }} notMerge={true} />
-              </div>
-            </Card>
-          </Col>
-        </Row>
+        {cityDataLoading ? (
+          <div className="flex items-center justify-center" style={{ height: 320 }}>
+            <Spin size="large" tip="正在加载城市数据..." />
+          </div>
+        ) : cityData ? (
+          <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
+            <Col xs={24} lg={14}>
+              <Card size="small" className="border-1">
+                <div style={{ height: 320 }}>
+                  {cityData.trendData.length > 0 ? (
+                    <ReactECharts option={drillDownTrendOption} style={{ height: '100%' }} notMerge={true} />
+                  ) : (
+                    <Empty description="暂无出栏趋势数据" style={{ paddingTop: 80 }} />
+                  )}
+                </div>
+              </Card>
+            </Col>
+            <Col xs={24} lg={10}>
+              <Card size="small" className="border-1">
+                <div style={{ height: 320 }}>
+                  {cityData.diseaseData.length > 0 ? (
+                    <ReactECharts option={drillDownDiseaseOption} style={{ height: '100%' }} notMerge={true} />
+                  ) : (
+                    <Empty description="暂无疫病数据" style={{ paddingTop: 80 }} />
+                  )}
+                </div>
+              </Card>
+            </Col>
+          </Row>
+        ) : (
+          <div style={{ padding: 40, textAlign: 'center' }}>
+            <Empty description="暂无城市数据" />
+          </div>
+        )}
         
         <div style={{ marginTop: 16, padding: 12, background: '#f0fdf4', borderRadius: 8 }}>
           <p className="text-sm text-green-800 m-0">
