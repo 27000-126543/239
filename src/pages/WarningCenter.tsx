@@ -1,6 +1,6 @@
 
 import React, { useEffect, useState } from 'react';
-import { Card, Table, Tag, Button, Modal, Form, Input, message, Timeline, Space, Badge } from 'antd';
+import { Row, Col, Card, Table, Tag, Button, Modal, Form, Input, message, Timeline, Space, Badge, Statistic } from 'antd';
 import { 
   WarningOutlined, 
   CheckCircleOutlined, 
@@ -9,7 +9,7 @@ import {
   CheckOutlined
 } from '@ant-design/icons';
 import { useStore } from '../store/useStore';
-import { getWarnings, approveWarningStep } from '../services/api';
+import { getWarnings, approveWarningStep, checkWarnings } from '../services/api';
 import type { ColumnsType } from 'antd/es/table';
 import type { Warning } from '../types';
 
@@ -32,6 +32,23 @@ const WarningCenter: React.FC = () => {
       if (res.success && res.data) {
         setWarnings(res.data);
       }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCheckWarnings = async () => {
+    setLoading(true);
+    try {
+      const res = await checkWarnings();
+      if (res.success) {
+        message.success(res.message || '检测完成');
+        loadWarnings();
+      } else {
+        message.error(res.message || '检测失败');
+      }
+    } catch (err) {
+      message.error('检测失败，请重试');
     } finally {
       setLoading(false);
     }
@@ -212,7 +229,12 @@ const WarningCenter: React.FC = () => {
           <h1 className="text-2xl font-bold text-gray-800 m-0">智能预警中心</h1>
           <p className="text-gray-500 mt-1 m-0">实时监控产业风险，及时预警处置</p>
         </div>
-        <Button type="primary" onClick={loadWarnings}>刷新数据</Button>
+        <Space>
+          <Button type="primary" onClick={handleCheckWarnings} loading={loading}>
+            自动检测预警
+          </Button>
+          <Button onClick={loadWarnings}>刷新数据</Button>
+        </Space>
       </div>
 
       <Row gutter={[16, 16]}>

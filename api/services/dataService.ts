@@ -2,14 +2,31 @@
 import { getDb } from './db.js';
 import type { CoreMetrics, FarmData, SlaughterData, MarketData, Warning, ApprovalStep, ForecastResult, WeeklyReport, FeedPrice } from '../types/index.js';
 
-export async function getNationalMetrics(date?: string): Promise<CoreMetrics[]> {
+export async function getNationalMetrics(date?: string, province?: string, startDate?: string, endDate?: string): Promise<CoreMetrics[]> {
   const db = await getDb();
-  const targetDate = date || new Date().toISOString().split('T')[0];
+  let query = 'SELECT * FROM core_metrics WHERE 1=1';
+  const params: any[] = [];
   
-  const metrics = await db.all(
-    'SELECT * FROM core_metrics WHERE calculate_date = ?',
-    [targetDate]
-  );
+  if (date) {
+    query += ' AND calculate_date = ?';
+    params.push(date);
+  }
+  if (province) {
+    query += ' AND province = ?';
+    params.push(province);
+  }
+  if (startDate) {
+    query += ' AND calculate_date >= ?';
+    params.push(startDate);
+  }
+  if (endDate) {
+    query += ' AND calculate_date <= ?';
+    params.push(endDate);
+  }
+  
+  query += ' ORDER BY calculate_date DESC, province ASC';
+  
+  const metrics = await db.all(query, params);
   
   return metrics.map((m: any) => ({
     id: m.id,
@@ -357,4 +374,119 @@ export async function getFeedPrices(province?: string): Promise<FeedPrice[]> {
     soybeanMealPrice: p.soybean_meal_price,
     reportDate: p.report_date
   }));
+}
+
+export async function checkAndCreateWarnings(): Promise<Warning[]> {
+  const db = await getDb();
+  const createdWarnings: Warning[] = [];
+  
+  const provinces = await db.all('SELECT DISTINCT province FROM core_metrics');
+  
+  for (const { province } of provinces) {
+    const recentMetrics = await db.all(
+      `SELECT * FROM core_metrics 
+       WHERE province = ? 
+       ORDER BY calculate_date DESC 
+       LIMIT 10`,
+      [province]
+    );
+    
+    if (recentMetrics.length < 5) continue;
+    
+    const lowGrainRatioDays = recentMetrics.filter((m: any) => m.avg_grain_ratio < 5.0).length;
+    if (lowGrainRatioDays >= 5) {
+      const existingWarning = await db.get(
+        `SELECT * FROM warnings 
+         WHERE province = ? AND type = 'grain_ratio' AND status IN ('pending', 'confirmed', 'reviewed')
+         ORDER BY triggered_at DESC LIMIT 1`,
+        [province]
+      );
+      
+      if (!existingWarning) {
+        const warning = await createWarning(
+          province,
+          'grain_ratio',
+          'primary',
+          `${province}猪粮比已连续${lowGrainRatioDays}天低于5:1，低于盈亏平衡点，建议启动收储预案`
+        );
+        createdWarnings.push(warning);
+      }
+    }
+    
+    if (recentMetrics.length >= 8) {
+      const recent7Days = recentMetrics.slice(0, 7);
+      const prev7Days = recentMetrics.slice(7, 14);
+      
+      if (prev7Days.length >= 7) {
+        const recentAvgSlaughter = recent7Days.reduce((sum: number, m: any) => sum + m.total_slaughter, 0) / 7;
+        const prevAvgSlaughter = prev7Days.reduce((sum: number, m: any) => sum + m.total_slaughter, 0) / 7;
+        const dropRate = ((prevAvgSlaughter - recentAvgSlaughter) / prevAvgSlaughter) * 100;
+        
+        if (dropRate >= 20) {
+          const existingWarning = await db.get(
+            `SELECT * FROM warnings 
+             WHERE province = ? AND type = 'slaughter_drop' AND status IN ('pending', 'confirmed', 'reviewed')
+             ORDER BY triggered_at DESC LIMIT 1`,
+            [province]
+          );
+          
+          if (!existingWarning) {
+            const warning = await createWarning(
+              province,
+              'slaughter_drop',
+              'primary',
+              `${province}出栏量同比下降${dropRate.toFixed(1)}%，降幅超过20%阈值，建议启动临时补贴方案`
+            );
+            createdWarnings.push(warning);
+          }
+        }
+      }
+    }
+  }
+  
+  return createdWarnings;
+}
+
+async function createWarning(province: string, type: string, level: string, description: string): Promise<Warning> {
+  const db = await getDb();
+  const id = `w${Date.now()}${Math.random().toString(36).substr(2, 6)}`;
+  const now = new Date().toISOString();
+  
+  await db.run(
+    `INSERT INTO warnings (id, type, level, province, description, triggered_at, status, current_step)
+     VALUES (?, ?, ?, ?, ?, ?, 'pending', 0)`,
+    [id, type, level, province, description, now]
+  );
+  
+  const steps = [
+    { step: 1, role: 'enterprise', status: 'pending' },
+    { step: 2, role: 'provincial', status: 'pending' },
+    { step: 3, role: 'national', status: 'pending' }
+  ];
+  
+  for (const s of steps) {
+    await db.run(
+      `INSERT INTO approval_steps (id, warning_id, step, role, status)
+       VALUES (?, ?, ?, ?, ?)`,
+      [`${id}_s${s.step}`, id, s.step, s.role, s.status]
+    );
+  }
+  
+  return {
+    id,
+    type: type as any,
+    level: level as any,
+    province,
+    description,
+    triggeredAt: now,
+    status: 'pending',
+    currentStep: 0,
+    approvalFlow: steps.map(s => ({
+      id: `${id}_s${s.step}`,
+      warningId: id,
+      step: s.step,
+      role: s.role,
+      status: 'pending' as const
+    }))
+  };
 }

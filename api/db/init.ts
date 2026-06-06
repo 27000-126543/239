@@ -155,6 +155,15 @@ export async function initDatabase() {
       report_date TEXT NOT NULL,
       created_at TEXT DEFAULT CURRENT_TIMESTAMP
     );
+
+    CREATE TABLE IF NOT EXISTS sow_inventory (
+      id TEXT PRIMARY KEY,
+      province TEXT NOT NULL,
+      sow_count INTEGER NOT NULL,
+      change_rate REAL NOT NULL DEFAULT 0,
+      report_date TEXT NOT NULL,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
   `);
 
   const userCount = await db.get('SELECT COUNT(*) as count FROM users');
@@ -335,7 +344,16 @@ async function seedMockData(db: any) {
         const cornPrice = 2.5 + Math.random() * 0.5;
         const soybeanMealPrice = 3.5 + Math.random() * 1;
         const avgFCR = count > 0 ? Math.round((totalFeed / (totalSlaughter * 110 || 1)) * 100) / 100 : 2.8;
-        const avgGrainRatio = Math.round((20 / (cornPrice * 2)) * 100) / 100;
+        
+        let avgGrainRatio: number;
+        if (prov.name === '河南省' && d < 8) {
+          avgGrainRatio = Math.round((4.2 + Math.random() * 0.5) * 100) / 100;
+        } else if (prov.name === '湖南省' && d < 6) {
+          avgGrainRatio = Math.round((4.0 + Math.random() * 0.6) * 100) / 100;
+        } else {
+          avgGrainRatio = Math.round((5.5 + Math.random() * 2) * 100) / 100;
+        }
+        
         const changeRate = Math.round((Math.random() * 6 - 3) * 100) / 100;
         const avgWeight = count > 0 ? Math.round((totalWeight / count) * 10) / 10 : 115;
 

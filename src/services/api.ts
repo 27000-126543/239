@@ -90,4 +90,9 @@ export async function getFeedPrices(province?: string): Promise<ApiResponse<any>
   return res.data;
 }
 
+export async function checkWarnings(): Promise<ApiResponse<any>> {
+  const res = await api.post('/warnings/check');
+  return res.data;
+}
+
 export default api;
